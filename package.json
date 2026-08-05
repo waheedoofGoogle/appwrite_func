@@ -1,0 +1,10 @@
+{
+  "name": "processes-stats-function",
+  "version": "1.0.0",
+  "description": "Appwrite Function: returns aggregated statistics for the processes collection (sum & count by moneyCode + total count)",
+  "type": "module",
+  "main": "src/main.js",
+  "dependencies": {
+    "node-appwrite": "^14.0.0"
+  }
+}
