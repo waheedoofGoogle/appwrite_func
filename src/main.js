@@ -3,8 +3,15 @@ import { Client, Databases, Query } from 'node-appwrite';
 /**
  * Appwrite Function: getProcessesStats
  * ------------------------------------
- * يقوم بحساب جميع إحصائيات العمليات (الوارد والصادر) مفروزة حسب العملة وحسب الشهر
- * في استدعاء واحد فقط، دون أي تكرار في البيانات المسترجعة.
+ * يحسب إحصائيات العمليات (الوارد والصادر):
+ *
+ * 1. الإحصائيات العامة حسب العملة.
+ * 2. الإحصائيات الشهرية حسب العملة.
+ *
+ * يعتمد تحديد الشهر بالكامل على الحقل:
+ * accounting_date
+ *
+ * ولا يعتمد على $createdAt.
  */
 
 export default async ({ req, res, log, error }) => {
@@ -15,61 +22,129 @@ export default async ({ req, res, log, error }) => {
 
   const databases = new Databases(client);
 
-  const databaseId = process.env.DATABASE_ID || 'eye_care_accounting_db';
-  const collectionId = process.env.PROCESSES_COLLECTION_ID || 'processes';
+  const databaseId =
+    process.env.DATABASE_ID || 'eye_care_accounting_db';
+
+  const collectionId =
+    process.env.PROCESSES_COLLECTION_ID || 'processes';
 
   const PAGE_LIMIT = 100;
 
   try {
-    // 1. الإحصائيات التراكمية العامة (مفروزة حسب العملة فقط)
-    const statsByCurrency = {}; 
-    /* الهيكل المتوقع:
-       {
-         "USD": { incomeSum: 500, incomeCount: 3, expenseSum: 200, expenseCount: 1, totalCount: 4 },
-         "SYP": { incomeSum: 1000, incomeCount: 5, expenseSum: 0, expenseCount: 0, totalCount: 5 }
-       }
-    */
+    // =========================================================
+    // الإحصائيات العامة حسب العملة
+    // =========================================================
 
-    // 2. الإحصائيات المفروزة شهرياً (حسب العملة داخل كل شهر)
+    const statsByCurrency = {};
+
+    // =========================================================
+    // الإحصائيات الشهرية حسب العملة
+    // =========================================================
+
     const monthlyStats = {};
-    /* الهيكل المتوقع:
-       {
-         "2026-06": {
-            "USD": { incomeSum: 100, incomeCount: 1, expenseSum: 50, expenseCount: 1, totalCount: 2 }
-         }
-       }
-    */
 
+    // العدد الإجمالي لجميع العمليات
     let totalCountAll = 0;
+
+    // Cursor للتصفح بين الصفحات
     let lastDocumentId = null;
+
+    // =========================================================
+    // جلب جميع العمليات على دفعات
+    // =========================================================
 
     while (true) {
       const queries = [
         Query.limit(PAGE_LIMIT),
-        // جلب الحقول المطلوبة فقط لتقليل البيانات المنقولة (مع التاريخ $createdAt)
-        Query.select(['price', 'moneyCode', 'income', '$createdAt']),
+
+        // جلب الحقول المطلوبة فقط
+        Query.select([
+          'price',
+          'moneyCode',
+          'income',
+          'accounting_date',
+        ]),
       ];
 
       if (lastDocumentId) {
         queries.push(Query.cursorAfter(lastDocumentId));
       }
 
-      const page = await databases.listDocuments(databaseId, collectionId, queries);
+      const page = await databases.listDocuments(
+        databaseId,
+        collectionId,
+        queries
+      );
+
+      // =======================================================
+      // معالجة العمليات الموجودة في الصفحة الحالية
+      // =======================================================
 
       for (const doc of page.documents) {
-        const code = doc.moneyCode || 'UNKNOWN';
-        const price = Number(doc.price) || 0;
-        const isIncome = doc.income === true;
-        
-        // استخراج السنة والشهر من تاريخ الإنشاء (مثال: "2026-06-29..." تصبح "2026-06")
-        const monthKey = doc.$createdAt ? doc.$createdAt.substring(0, 7) : 'UNKNOWN_DATE';
+        // -----------------------------------------------------
+        // العملة
+        // -----------------------------------------------------
 
-        // --- أولاً: تهيئة وتحديث الإحصائيات العامة حسب العملة ---
-        if (!statsByCurrency[code]) {
-          statsByCurrency[code] = { incomeSum: 0, incomeCount: 0, expenseSum: 0, expenseCount: 0, totalCount: 0 };
+        const code =
+          doc.moneyCode !== null &&
+          doc.moneyCode !== undefined &&
+          String(doc.moneyCode).trim() !== ''
+            ? String(doc.moneyCode).trim()
+            : 'UNKNOWN';
+
+        // -----------------------------------------------------
+        // السعر
+        // -----------------------------------------------------
+
+        const price = Number(doc.price) || 0;
+
+        // -----------------------------------------------------
+        // نوع العملية
+        // true  = وارد
+        // false = صادر
+        // -----------------------------------------------------
+
+        const isIncome = doc.income === true;
+
+        // -----------------------------------------------------
+        // التاريخ المحاسبي
+        //
+        // مثال:
+        // 2026-06-29
+        // 2026-06-29T12:30:00.000+00:00
+        //
+        // يتم استخراج YYYY-MM فقط.
+        // -----------------------------------------------------
+
+        let monthKey = 'UNKNOWN_DATE';
+
+        if (
+          doc.accounting_date !== null &&
+          doc.accounting_date !== undefined
+        ) {
+          const accountingDate = String(doc.accounting_date).trim();
+
+          if (accountingDate.length >= 7) {
+            monthKey = accountingDate.substring(0, 7);
+          }
         }
-        
+
+        // =====================================================
+        // الإحصائيات العامة حسب العملة
+        // =====================================================
+
+        if (!statsByCurrency[code]) {
+          statsByCurrency[code] = {
+            incomeSum: 0,
+            incomeCount: 0,
+            expenseSum: 0,
+            expenseCount: 0,
+            totalCount: 0,
+          };
+        }
+
         statsByCurrency[code].totalCount += 1;
+
         if (isIncome) {
           statsByCurrency[code].incomeSum += price;
           statsByCurrency[code].incomeCount += 1;
@@ -78,15 +153,26 @@ export default async ({ req, res, log, error }) => {
           statsByCurrency[code].expenseCount += 1;
         }
 
-        // --- ثانياً: تهيئة وتحديث الإحصائيات الشهرية ---
+        // =====================================================
+        // الإحصائيات الشهرية حسب العملة
+        // =====================================================
+
         if (!monthlyStats[monthKey]) {
           monthlyStats[monthKey] = {};
         }
+
         if (!monthlyStats[monthKey][code]) {
-          monthlyStats[monthKey][code] = { incomeSum: 0, incomeCount: 0, expenseSum: 0, expenseCount: 0, totalCount: 0 };
+          monthlyStats[monthKey][code] = {
+            incomeSum: 0,
+            incomeCount: 0,
+            expenseSum: 0,
+            expenseCount: 0,
+            totalCount: 0,
+          };
         }
 
         monthlyStats[monthKey][code].totalCount += 1;
+
         if (isIncome) {
           monthlyStats[monthKey][code].incomeSum += price;
           monthlyStats[monthKey][code].incomeCount += 1;
@@ -95,24 +181,49 @@ export default async ({ req, res, log, error }) => {
           monthlyStats[monthKey][code].expenseCount += 1;
         }
 
+        // =====================================================
+        // العدد الإجمالي
+        // =====================================================
+
         totalCountAll += 1;
       }
 
-      if (page.documents.length < PAGE_LIMIT) break;
+      // =======================================================
+      // إذا كانت الصفحة الأخيرة نتوقف
+      // =======================================================
 
-      lastDocumentId = page.documents[page.documents.length - 1].$id;
+      if (page.documents.length < PAGE_LIMIT) {
+        break;
+      }
+
+      // Cursor للصفحة التالية
+      lastDocumentId =
+        page.documents[page.documents.length - 1].$id;
     }
 
-    log(`Processed ${totalCountAll} documents across all pages.`);
+    // =========================================================
+    // تسجيل النتيجة
+    // =========================================================
 
-    // النتيجة النهائية نظيفة تماماً وبدون أي تكرار للحقول
+    log(
+      `Processed ${totalCountAll} documents using accounting_date.`
+    );
+
     const responseData = {
-      countAll: totalCountAll,   // العدد الإجمالي لكل العمليات في النظام
-      byCurrency: statsByCurrency, // الإحصائيات العامة لكل عملة متوفرة
-      byMonth: monthlyStats        // الإحصائيات مفروزة شهرياً وبداخلها العملات
+      countAll: totalCountAll,
+
+      // الإحصائيات الإجمالية حسب العملة
+      byCurrency: statsByCurrency,
+
+      // الإحصائيات الشهرية حسب accounting_date
+      byMonth: monthlyStats,
     };
 
     log(`Result: ${JSON.stringify(responseData)}`);
+
+    // =========================================================
+    // الاستجابة
+    // =========================================================
 
     return res.json({
       success: true,
@@ -120,6 +231,7 @@ export default async ({ req, res, log, error }) => {
     });
   } catch (err) {
     error(err.message);
+
     return res.json(
       {
         success: false,
